@@ -279,10 +279,6 @@ def generate_pharma_report(aid, pharma_name, json_file, prescription_key,
     final_df.to_excel(output_file, index=False)
     print("✅ Final Report Generated:", output_file)
 
-    # =================================================================
-    # The entire rest of your logic is unchanged, only using output_file
-    # =================================================================
-
     # ------------------------------------------------------------
     # 7️⃣ CREATE SUMMARY SHEET (MR → ABM → RBM → SM)
     # ------------------------------------------------------------
@@ -533,7 +529,7 @@ def generate_pharma_report(aid, pharma_name, json_file, prescription_key,
     print("Waterfall Summary sheet built:", waterfall_df.shape)
 
     # ⭐ 4) RBM-ONLY SUMMARY SHEET
-    rbm_only = summary_df[summary_df["designation"] == "rbm"].copy()
+    rbm_only = waterfall_df[waterfall_df["designation"] == "rbm"].copy()
 
     with pd.ExcelWriter(
         output_file,

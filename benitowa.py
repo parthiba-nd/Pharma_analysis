@@ -214,7 +214,7 @@ print("✅ Base Report Generated:", output_file)
 # ============================================================
 # 🔁 BENITOWA HIERARCHY SUMMARY (ABM → RBM → SM)
 #    🔹 Worker level = ABM (no MR)
-#    🔹 Expected camps per ABM = 2
+#    🔹 Expected camps per ABM = 4
 #    🔹 RBM & SM = rolled up from ABMs
 # ============================================================
 
@@ -238,7 +238,7 @@ abm_camps["designation"] = abm_camps["mr_designation"].str.lower().fillna("")
 abm_rows = abm_camps[abm_camps["designation"] == "abm"].copy()
 abm_rows["name"] = abm_rows["mr_name"]
 abm_rows["total_camps"] = abm_rows["Total Camps"].fillna(0).astype(float)
-abm_rows["expected_camps"] = 4.0  # ⭐ Benitowa: 2 camps per ABM
+abm_rows["expected_camps"] = 4.0  
 
 abm_rows = abm_rows[[
     "empId", "name", "abm_name", "rbm_name", "sm_name",
@@ -376,6 +376,126 @@ for sm, sm_group in summary_df.groupby("sm_name", dropna=False):
         final_rows.append(sm_row.iloc[0])
 
 waterfall_df = pd.DataFrame(final_rows).reset_index(drop=True)
+
+# =====================================================================
+#   BENITOWA: INSERT MISSING RBM/SM ROWS WITH HIERARCHY RULES
+#   Worker Level = ABM (expected = 4)
+# =====================================================================
+
+df = waterfall_df.copy()
+out_rows = []
+
+def make_row(desig, name, sm, rbm, abm, total=0.0, expected=0.0):
+    """Creates a synthetic ABM/RBM/SM row"""
+    return pd.Series({
+        "empId": "",
+        "name": name,
+        "designation": desig,
+        "sm_name": sm,
+        "rbm_name": rbm,
+        "abm_name": abm,
+        "state": "",
+        "city": "",
+        "hq": "",
+        "total_camps": float(total),
+        "expected_camps": float(expected),
+        "execution_percent": 0
+    })
+
+
+# --------------------------------------------------------------
+# GROUP BY SM
+# --------------------------------------------------------------
+for sm, sm_group in df.groupby("sm_name", dropna=False):
+
+    sm_present = (sm_group["designation"].str.lower() == "sm").any()
+
+    # ----------------------------------------------------------
+    # GROUP BY RBM inside this SM
+    # ----------------------------------------------------------
+    for rbm, rbm_group in sm_group.groupby("rbm_name", dropna=False):
+
+        rbm_present = (rbm_group["designation"].str.lower() == "rbm").any()
+
+        # ------------------------------------------------------
+        # GROUP BY ABM inside this RBM (worker layer)
+        # ------------------------------------------------------
+        for abm, abm_group in rbm_group.groupby("abm_name", dropna=False):
+
+            abm_present = (abm_group["designation"].str.lower() == "abm").any()
+
+            # 1️⃣ Add ABM worker rows first
+            abm_workers = abm_group[abm_group["designation"].str.lower() == "abm"]
+            for _, r in abm_workers.iterrows():
+                out_rows.append(r)
+
+            # 2️⃣ Insert missing ABM only if:
+            #     • ABM exists as name (not blank)
+            #     • ABM row NOT present
+            #     • RBM row for that person does NOT exist
+            #     • SM row for that person does NOT exist
+            if abm and (not abm_present) and (not rbm_present) and (not sm_present):
+                total = abm_workers["total_camps"].sum()
+                out_rows.append(
+                    make_row("abm", abm, sm, rbm, abm, total=total, expected=4.0)
+                )
+
+        # ------------------------------------------------------
+        # RBM INSERTION
+        # ------------------------------------------------------
+        if rbm and (not rbm_present) and (not sm_present):
+
+            worker_under_rbm = df[
+                (df["rbm_name"] == rbm) &
+                (df["designation"].str.lower() == "abm")
+            ]
+
+            total = worker_under_rbm["total_camps"].sum()
+
+            expected = 4.0 * len(worker_under_rbm)
+
+            out_rows.append(
+                make_row("rbm", rbm, sm, rbm, "", total=total, expected=expected)
+            )
+
+        elif rbm_present:
+            rbm_row = rbm_group[rbm_group["designation"].str.lower() == "rbm"]
+            out_rows.append(rbm_row.iloc[0])
+
+    # ------------------------------------------------------
+    # SM INSERTION
+    # ------------------------------------------------------
+    if sm and (not sm_present):
+
+        rbm_under_sm = df[
+            (df["sm_name"] == sm) &
+            (df["designation"].str.lower() == "rbm")
+        ]
+
+        abm_under_sm = df[
+            (df["sm_name"] == sm) &
+            (df["designation"].str.lower() == "abm")
+        ]
+
+        if not rbm_under_sm.empty:
+            total = rbm_under_sm["total_camps"].sum()
+            expected = rbm_under_sm["expected_camps"].sum()
+        else:
+            total = abm_under_sm["total_camps"].sum()
+            expected = abm_under_sm["expected_camps"].sum()
+
+        out_rows.append(
+            make_row("sm", sm, sm, "", "", total=total, expected=expected)
+        )
+
+    else:
+        sm_row = sm_group[sm_group["designation"].str.lower() == "sm"]
+        if not sm_row.empty:
+            out_rows.append(sm_row.iloc[0])
+
+# Build updated waterfall
+waterfall_df = pd.DataFrame(out_rows).reset_index(drop=True)
+
 waterfall_df = waterfall_df.drop(columns=["rank"], errors="ignore")
 
 # ------------------------------------------------------------

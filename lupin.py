@@ -13,7 +13,7 @@ warnings.filterwarnings('ignore')
 st = storage.Client("neodocs-8d6cd")
 bucket = st.bucket("neodocs-8d6cd-utils")
 
-blob = bucket.blob("org_access_codes/akumentis-hb.json")
+blob = bucket.blob("org_access_codes/lupin-hb.json")
 json_data = blob.download_as_text()
 employee_dict = json.loads(json_data)
 
@@ -76,7 +76,7 @@ print("SQL Range (Current Month):", START_DATE, "to", END_DATE)
 
 
 # ------------------------------------------------------------
-# CLEAN SQL QUERY (hemaday + benitowa HB)
+# CLEAN SQL QUERY (hemaday + lupin_hb HB)
 # ------------------------------------------------------------
 query = """
 WITH test_summary AS (
@@ -90,7 +90,7 @@ WITH test_summary AS (
     FROM dbo.user_tests u
     LEFT JOIN dbo.aId a ON u.aId = a.aId
     WHERE 
-        a.aId = '58454135-f6d6-4138-abce-c24075009c15'
+        a.aId = '02c6bc8e-9395-4cff-80cc-af0df4f951af'
         AND u.statusCode = 200
         AND u.isDeleted = 0
         AND u.campDate BETWEEN ? AND ?
@@ -102,15 +102,15 @@ rx_summary AS (
         r.aId,
         r.oId,
         r.campDate,
-        SUM(TRY_CAST(LEFT(JSON_VALUE(r.prescriptions, '$.hemaday'), 
-            CHARINDEX('|', JSON_VALUE(r.prescriptions, '$.hemaday')) - 1) AS INT)) AS [Total Rx],
-        SUM(TRY_CAST(LTRIM(RIGHT(JSON_VALUE(r.prescriptions, '$.hemaday'), 
-            LEN(JSON_VALUE(r.prescriptions, '$.hemaday')) - 
-            CHARINDEX('|', JSON_VALUE(r.prescriptions, '$.hemaday')))) AS INT)) AS [Total Strips]
+        SUM(TRY_CAST(LEFT(JSON_VALUE(r.prescriptions, '$.lupiheme'), 
+            CHARINDEX('|', JSON_VALUE(r.prescriptions, '$.lupiheme')) - 1) AS INT)) AS [Total Rx],
+        SUM(TRY_CAST(LTRIM(RIGHT(JSON_VALUE(r.prescriptions, '$.lupiheme'), 
+            LEN(JSON_VALUE(r.prescriptions, '$.lupiheme')) - 
+            CHARINDEX('|', JSON_VALUE(r.prescriptions, '$.lupiheme')))) AS INT)) AS [Total Strips]
     FROM dbo.rx r
     LEFT JOIN dbo.aId a ON r.aId = a.aId
     WHERE 
-        a.aId = '58454135-f6d6-4138-abce-c24075009c15'
+        a.aId = '02c6bc8e-9395-4cff-80cc-af0df4f951af'
         AND r.isDeleted = 0
         AND r.campDate BETWEEN ? AND ?
     GROUP BY r.aId, r.oId, r.campDate
@@ -218,7 +218,7 @@ final_df = final_df.drop(columns=["region_list"], errors="ignore")
 # ------------------------------------------------------------
 # 6️⃣ EXPORT TO EXCEL
 # ------------------------------------------------------------
-output_file = "benitowa_employee_doctor_report.xlsx"
+output_file = "lupin_hb_employee_doctor_report.xlsx"
 final_df.to_excel(output_file, index=False)
 
 print("✅ Final Report Generated:", output_file)
@@ -255,7 +255,7 @@ mr_rows = mr_camps.assign(
     name=mr_camps["mr_name"],
     designation="mr",
     total_camps=mr_camps["Total Camps"].fillna(0).astype(float),
-    expected_camps=4.0
+    expected_camps=2.0
 )[[
     "empId", "name", "abm_name", "rbm_name", "sm_name",
     "state", "city", "designation", "hq",
@@ -282,6 +282,75 @@ manager_df = pd.concat(manager_rows, ignore_index=True)
 
 # Combine MR + manager records
 summary_df = pd.concat([mr_rows, manager_df], ignore_index=True)
+
+
+all_sms = emp_df["sm_name"].dropna().unique().tolist()
+all_rbms = emp_df["rbm_name"].dropna().unique().tolist()
+all_abms = emp_df["abm_name"].dropna().unique().tolist()
+
+new_rows = []
+
+for sm in all_sms:
+    exists = ((summary_df["designation"] == "sm") & 
+              (summary_df["name"] == sm)).any()
+    if not exists:
+        new_rows.append({
+            "empId": "",
+            "name": sm,
+            "designation": "sm",
+            "mr_name": sm,
+            "abm_name": sm,
+            "rbm_name": sm,
+            "sm_name": sm,
+            "state": "",
+            "city": "",
+            "hq": "",
+            "total_camps": 0.0,
+            "expected_camps": 0.0,
+        })
+
+for rbm in all_rbms:
+    exists = ((summary_df["designation"] == "rbm") & 
+              (summary_df["name"] == rbm)).any()
+    if not exists:
+        new_rows.append({
+            "empId": "",
+            "name": rbm,
+            "designation": "rbm",
+            "mr_name": rbm,
+            "abm_name": rbm,
+            "rbm_name": rbm,
+            "sm_name": rbm,   # temporary, will get corrected later
+            "state": "",
+            "city": "",
+            "hq": "",
+            "total_camps": 0.0,
+            "expected_camps": 0.0,
+        })
+
+for abm in all_abms:
+    exists = ((summary_df["designation"] == "abm") &
+              (summary_df["name"] == abm)).any()
+    if not exists:
+        new_rows.append({
+            "empId": "",
+            "name": abm,
+            "designation": "abm",
+            "mr_name": abm,
+            "abm_name": abm,
+            "rbm_name": abm,   # temporary, corrected later
+            "sm_name": abm,    # temporary
+            "state": "",
+            "city": "",
+            "hq": "",
+            "total_camps": 0.0,
+            "expected_camps": 0.0,
+        })
+
+if new_rows:
+    summary_df = pd.concat([summary_df, pd.DataFrame(new_rows)], ignore_index=True)
+
+
 
 # ------------------------------------------------------------
 # 5️⃣ Remove duplicates — keep highest designation
@@ -388,7 +457,7 @@ group_maps = {}
 
 for role, col in [("abm", "abm_name"), ("rbm", "rbm_name"), ("sm", "sm_name")]:
     g = true_mr_after.groupby(col)["total_camps"].agg(["sum", "count"]).reset_index()
-    g["expected"] = g["count"] * 4
+    g["expected"] = g["count"] * 2
 
     group_maps[role] = {
         "total": dict(zip(g[col], g["sum"])),
@@ -420,11 +489,13 @@ summary_df["execution_percent"] = summary_df.apply(
     axis=1
 ).round(0).astype(int)
 
+
 # ------------------------------------------------------------
 # ⭐ 2) BUILD WATERFALL SUMMARY (MR → ABM → RBM → SM)
 # ------------------------------------------------------------
 
 final_rows = []
+assigned_mr_indices = set()   # prevent MRs from being counted twice
 
 for sm, sm_group in summary_df.groupby("sm_name", dropna=False):
 
@@ -440,9 +511,6 @@ for sm, sm_group in summary_df.groupby("sm_name", dropna=False):
 
         for abm, abm_group in rbm_group.groupby("abm_name", dropna=False):
 
-            # A real ABM must:
-            # 1. Have a valid name (not Vacant(...))
-            # 2. Have an ABM row in the group
             if isinstance(abm, str) and abm.startswith("Vacant ("):
                 continue
 
@@ -452,45 +520,48 @@ for sm, sm_group in summary_df.groupby("sm_name", dropna=False):
             real_abm_groups[abm] = abm_group
 
         # ---------------------------------------------------------
-        # 1️⃣ Process REAL ABM blocks → MRs + ABM row
+        # 1️⃣ REAL ABM BLOCK → Add MRs + ABM row
         # ---------------------------------------------------------
-        mrs_assigned = []
+        mrs_assigned_local = set()
 
         for abm, abm_group in real_abm_groups.items():
 
-            # MRs under this real ABM
             mrs = abm_group[abm_group["designation"] == "mr"]
 
             for _, row in mrs.iterrows():
-                final_rows.append(row)
-                mrs_assigned.append(row.name)
 
-            # ABM row (real)
+                if row.name not in assigned_mr_indices:
+                    final_rows.append(row)
+                    assigned_mr_indices.add(row.name)
+                    mrs_assigned_local.add(row.name)
+
             abm_row = abm_group[abm_group["designation"] == "abm"]
             if not abm_row.empty:
                 final_rows.append(abm_row.iloc[0])
 
-        mrs_assigned = set(mrs_assigned)
-
         # ---------------------------------------------------------
-        # 2️⃣ LEFTOVER MRs (those under rbm but not under real ABMs)
+        # 2️⃣ LEFTOVER MRs (not under any real ABM)
         # ---------------------------------------------------------
         all_mrs = rbm_group[rbm_group["designation"] == "mr"]
-        leftover_mrs = all_mrs[~all_mrs.index.isin(mrs_assigned)]
+        leftover_mrs = all_mrs[~all_mrs.index.isin(mrs_assigned_local)]
 
-        for _, row in leftover_mrs.iterrows():
+        leftover_mrs_unassigned = leftover_mrs[~leftover_mrs.index.isin(assigned_mr_indices)]
+
+        for _, row in leftover_mrs_unassigned.iterrows():
             final_rows.append(row)
+            assigned_mr_indices.add(row.name)
 
         # ---------------------------------------------------------
-        # 3️⃣ If leftover MRs exist → add Vacant ABM block
+        # 3️⃣ VACANT ABM BLOCK
         # ---------------------------------------------------------
-        if not leftover_mrs.empty:
+        if not leftover_mrs_unassigned.empty:
 
-            total_camps = leftover_mrs["total_camps"].sum()
-            expected_camps = leftover_mrs["expected_camps"].sum()
+            total_camps = leftover_mrs_unassigned["total_camps"].sum()
+            expected_camps = leftover_mrs_unassigned["expected_camps"].sum()
+
             exec_percent = (
                 round((total_camps / expected_camps) * 100)
-                if expected_camps > 0 else 0
+                if expected_camps else 0
             )
 
             vacant_abm = {
@@ -516,12 +587,10 @@ for sm, sm_group in summary_df.groupby("sm_name", dropna=False):
         rbm_row = rbm_group[rbm_group["designation"] == "rbm"]
 
         if not is_vacant_rbm:
-            # Real RBM
             if not rbm_row.empty:
                 final_rows.append(rbm_row.iloc[0])
 
         else:
-            # Synthetic RBM for Vacant RBM
             abm_rows = rbm_group[rbm_group["designation"] == "abm"]
 
             total_camps = abm_rows["total_camps"].sum()
@@ -529,7 +598,7 @@ for sm, sm_group in summary_df.groupby("sm_name", dropna=False):
 
             exec_percent = (
                 round((total_camps / expected_camps) * 100)
-                if expected_camps > 0 else 0
+                if expected_camps else 0
             )
 
             synthetic_rbm = {
@@ -556,29 +625,67 @@ for sm, sm_group in summary_df.groupby("sm_name", dropna=False):
     if not sm_row.empty:
         final_rows.append(sm_row.iloc[0])
 
-# Convert final rows into DataFrame
+
 waterfall_df = pd.DataFrame(final_rows)
 
-waterfall_df = waterfall_df.drop(columns=["abm_name","sm_name","rank"], errors="ignore")
+# ------------------------------------------------------------
+# ⭐ RECOMPUTE TOTALS AFTER CORRECT GROUPING (IMPORTANT)
+# ------------------------------------------------------------
+
+wf = waterfall_df.copy()
+wf["designation"] = wf["designation"].str.lower()
+
+# Only MR rows contribute to totals
+mr_only = wf[wf["designation"] == "mr"]
+
+# Recompute ABM totals
+abm_totals = mr_only.groupby("abm_name")[["total_camps", "expected_camps"]].sum()
+
+# Recompute RBM totals
+rbm_totals = mr_only.groupby("rbm_name")[["total_camps", "expected_camps"]].sum()
+
+# Recompute SM totals
+sm_totals = mr_only.groupby("sm_name")[["total_camps", "expected_camps"]].sum()
+
+def apply_totals(row):
+    n = row["name"]
+
+    if row["designation"] == "abm" and n in abm_totals.index:
+        row["total_camps"] = abm_totals.loc[n, "total_camps"]
+        row["expected_camps"] = abm_totals.loc[n, "expected_camps"]
+
+    elif row["designation"] == "rbm" and n in rbm_totals.index:
+        row["total_camps"] = rbm_totals.loc[n, "total_camps"]
+        row["expected_camps"] = rbm_totals.loc[n, "expected_camps"]
+
+    elif row["designation"] == "sm" and n in sm_totals.index:
+        row["total_camps"] = sm_totals.loc[n, "total_camps"]
+        row["expected_camps"] = sm_totals.loc[n, "expected_camps"]
+
+    return row
+
+waterfall_df = wf.apply(apply_totals, axis=1)
+
+# Execution %
+waterfall_df["execution_percent"] = waterfall_df.apply(
+    lambda r: (r["total_camps"] / r["expected_camps"] * 100)
+    if r["expected_camps"] else 0,
+    axis=1
+).round(0).astype(int)
+
 
 
 # ------------------------------------------------------------
 # ⭐ 3) EXPORT WATERFALL SUMMARY
 # ------------------------------------------------------------
 with pd.ExcelWriter(
-    "benitowa_employee_doctor_report.xlsx",
+    "lupin_hb_employee_doctor_report.xlsx",
     engine="openpyxl",
     mode="a"
 ) as writer:
     waterfall_df.to_excel(writer, sheet_name="Waterfall Summary", index=False)
 
 print("Waterfall Summary sheet built:", waterfall_df.shape)
-
-
-
-
-
-
 
 
 
@@ -589,7 +696,7 @@ print("Waterfall Summary sheet built:", waterfall_df.shape)
 rbm_only = summary_df[summary_df["designation"] == "rbm"].copy()
 
 with pd.ExcelWriter(
-    "benitowa_employee_doctor_report.xlsx",
+    "lupin_hb_employee_doctor_report.xlsx",
     engine="openpyxl",
     mode="a"
 ) as writer:
@@ -635,7 +742,7 @@ non_mr_activity = non_mr_activity[
 
 # 7️⃣ Export sheet
 with pd.ExcelWriter(
-    "benitowa_employee_doctor_report.xlsx",
+    "lupin_hb_employee_doctor_report.xlsx",
     engine="openpyxl",
     mode="a"
 ) as writer:
@@ -666,7 +773,7 @@ rbm_list = waterfall_df["rbm_name"].fillna("").unique().tolist()
 used_sheet_names = set()
 blank_count = 0
 
-with pd.ExcelWriter("benitowa_employee_doctor_report.xlsx", engine="openpyxl", mode="a") as writer:
+with pd.ExcelWriter("lupin_hb_employee_doctor_report.xlsx", engine="openpyxl", mode="a") as writer:
 
     for rbm in rbm_list:
 
@@ -718,7 +825,7 @@ from openpyxl import load_workbook
 from openpyxl.styles import PatternFill, Font, Border, Side, Alignment
 
 # Load workbook
-wb = load_workbook("benitowa_employee_doctor_report.xlsx")
+wb = load_workbook("lupin_hb_employee_doctor_report.xlsx")
 
 # Color codes
 COLOR_HEADER = "9DC3E6"   # Blue header
@@ -793,6 +900,6 @@ for sheet_name in wb.sheetnames:
         header = False
 
 # Save workbook
-wb.save("benitowa_employee_doctor_report.xlsx")
+wb.save("lupin_hb_employee_doctor_report.xlsx")
 
 print("🎨 Excel Styling Applied Successfully!")

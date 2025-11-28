@@ -305,22 +305,6 @@ summary_df = summary_df.sort_values("rank", ascending=False).drop_duplicates(sub
 
 
 # ------------------------------------------------------------
-# 6️⃣ TRUE MR dataset (for hierarchical aggregation)
-# ------------------------------------------------------------
-true_mr = emp_df[emp_df["mr_designation"].str.lower() == "mr"][[
-    "empId", "mr_name", "abm_name", "rbm_name", "sm_name"
-]]
-
-true_mr = true_mr.merge(
-    mr_camps[["empId", "Total Camps"]],
-    on="empId", how="left"
-)
-
-true_mr["total_camps"] = true_mr["Total Camps"].fillna(0)
-
-
-
-# ------------------------------------------------------------
 # ⭐ 0) FIX ABM NAMES PER RBM BLOCK (NEW RULE)
 # ------------------------------------------------------------
 
@@ -565,7 +549,7 @@ for sm, sm_group in summary_df.groupby("sm_name", dropna=False):
                 "designation": "abm",
                 "hq": "",
                 "total_camps": total_camps,
-                "expected_camps": expected_camps,
+                "expected_camps": 2.0,
                 "execution_percent": exec_percent
             }
 
@@ -621,8 +605,157 @@ for sm, sm_group in summary_df.groupby("sm_name", dropna=False):
 # Convert final rows into DataFrame
 waterfall_df = pd.DataFrame(final_rows)
 
-waterfall_df = waterfall_df.drop(columns=["abm_name","sm_name","rank"], errors="ignore")
 
+# ------------------------------------------------------------------
+# INSERT MISSING MANAGER ROWS — HIERARCHY AWARE
+# ------------------------------------------------------------------
+
+df = waterfall_df.copy()
+final_rows = []
+
+def make_row(desig, name, sm, rbm, abm, total=0.0, exp=0.0):
+    return pd.Series({
+        "empId": "",
+        "name": name,
+        "designation": desig,
+        "sm_name": sm,
+        "rbm_name": rbm,
+        "abm_name": abm,
+        "state": "",
+        "city": "",
+        "hq": "",
+        "total_camps": float(total),
+        "expected_camps": float(exp),
+        "execution_percent": 0
+    })
+
+
+# GROUP BY SM
+for sm, sm_block in df.groupby("sm_name", dropna=False):
+
+    # Check if SM row exists
+    sm_present = len(sm_block[(sm_block["designation"] == "sm") &
+                              (sm_block["name"] == sm)]) > 0
+
+    # GROUP BY RBM inside the SM
+    for rbm, rbm_block in sm_block.groupby("rbm_name", dropna=False):
+
+        # Check if RBM row exists
+        rbm_present = len(rbm_block[(rbm_block["designation"] == "rbm") &
+                                    (rbm_block["name"] == rbm)]) > 0
+
+        # GROUP BY ABM inside the RBM
+        for abm, abm_block in rbm_block.groupby("abm_name", dropna=False):
+
+            # Check if ABM row exists
+            abm_present = len(abm_block[(abm_block["designation"] == "abm") &
+                                        (abm_block["name"] == abm)]) > 0
+
+            # Add MRs first
+            mr_rows = abm_block[abm_block["designation"] == "mr"]
+            for _, r in mr_rows.iterrows():
+                final_rows.append(r)
+
+            # Insert ABM row IF:
+            # • ABM is not empty
+            # • ABM row does NOT exist
+            # • RBM for this person does not exist (respect hierarchy)
+            # • SM for this person does not exist
+            if abm and (not abm_present) and (not rbm_present) and (not sm_present):
+                total = mr_rows["total_camps"].sum()
+                final_rows.append(
+                    make_row("abm", abm, sm, rbm, abm, total=total, exp=2.0)
+                )
+            elif abm_present:
+                final_rows.append(abm_block[abm_block["designation"] == "abm"].iloc[0])
+
+        # ---------------- RBM INSERTION ----------------
+        # Insert RBM ONLY IF:
+        # • RBM exists as name
+        # • RBM row missing
+        # • SM row for person doesn't exist
+        if rbm and (not rbm_present) and (not sm_present):
+
+            # Compute total camps from ABMs under this RBM *after* inserts
+            abm_part = [r for r in final_rows
+                        if r["rbm_name"] == rbm and r["designation"] == "abm"]
+
+            total = sum(r["total_camps"] for r in abm_part)
+
+            final_rows.append(
+                make_row("rbm", rbm, sm, rbm, "", total=total, exp=0.0)
+            )
+
+        elif rbm_present:
+            final_rows.append(rbm_block[rbm_block["designation"] == "rbm"].iloc[0])
+
+    # ---------------- SM INSERTION ----------------
+    # Insert SM ONLY IF:
+    # • SM exists as name
+    # • SM row missing
+    if sm and (not sm_present):
+
+        # Compute total from RBMs under this SM
+        rbm_part = [r for r in final_rows
+                    if r["sm_name"] == sm and r["designation"] == "rbm"]
+
+        total = sum(r["total_camps"] for r in rbm_part)
+
+        final_rows.append(
+            make_row("sm", sm, sm, "", "", total=total, exp=0.0)
+        )
+
+    elif sm_present:
+        final_rows.append(sm_block[sm_block["designation"] == "sm"].iloc[0])
+
+
+# Final updated waterfall
+waterfall_df = pd.DataFrame(final_rows).reset_index(drop=True)
+
+
+waterfall_df = waterfall_df.drop(columns=["abm_name","rank"], errors="ignore")
+
+# ------------------------------------------------------------
+# ✅ RECOMPUTE EXPECTED CAMPS USING WATERFALL (AFTER VACANCIES)
+# ------------------------------------------------------------
+
+waterfall_df["designation"] = waterfall_df["designation"].str.lower()
+
+# 1️⃣ ABM expected = 2 (real + vacant)
+waterfall_df.loc[waterfall_df["designation"] == "abm", "expected_camps"] = 2.0
+
+# 2️⃣ RBM expected = sum of ABM expected
+rbm_expected_map = (
+    waterfall_df[waterfall_df["designation"] == "abm"]
+    .groupby("rbm_name", dropna=False)["expected_camps"]
+    .sum()
+    .to_dict()
+)
+
+waterfall_df.loc[waterfall_df["designation"] == "rbm", "expected_camps"] = (
+    waterfall_df.loc[waterfall_df["designation"] == "rbm", "rbm_name"]
+    .map(rbm_expected_map).fillna(0)
+)
+
+# 3️⃣ SM expected = sum of RBM expected
+sm_expected_map = (
+    waterfall_df[waterfall_df["designation"] == "rbm"]
+    .groupby("sm_name", dropna=False)["expected_camps"]
+    .sum()
+    .to_dict()
+)
+
+waterfall_df.loc[waterfall_df["designation"] == "sm", "expected_camps"] = (
+    waterfall_df.loc[waterfall_df["designation"] == "sm", "sm_name"]
+    .map(sm_expected_map).fillna(0)
+)
+
+# 4️⃣ Execution %
+waterfall_df["execution_percent"] = waterfall_df.apply(
+    lambda r: (r["total_camps"] / r["expected_camps"] * 100)
+    if r["expected_camps"] else 0,
+    axis=1
+).round(0).astype(int)
 
 # ------------------------------------------------------------
 # ⭐ 3) EXPORT WATERFALL SUMMARY
@@ -638,17 +771,14 @@ print("Waterfall Summary sheet built:", waterfall_df.shape)
 
 
 
-
-
-
-
-
-
 # ------------------------------------------------------------
 # ⭐ 4) RBM-ONLY SUMMARY SHEET
 # ------------------------------------------------------------
 
-rbm_only = summary_df[summary_df["designation"] == "rbm"].copy()
+rbm_only = waterfall_df[waterfall_df["designation"] == "rbm"].copy()
+
+# Sort RBMs by SM → RBM structure for better readability
+rbm_only = rbm_only.sort_values(["sm_name", "rbm_name"])
 
 with pd.ExcelWriter(
     "ipca_employee_doctor_report.xlsx",
@@ -657,6 +787,7 @@ with pd.ExcelWriter(
 ) as writer:
     rbm_only.to_excel(writer, sheet_name="RBM Summary", index=False)
 
+print("RBM Summary sheet updated with new synthetic RBM rows:", rbm_only.shape)
 
 # ------------------------------------------------------------
 # ⭐ TESTS DONE BY NON-MRs (from final_df, cleaned)
